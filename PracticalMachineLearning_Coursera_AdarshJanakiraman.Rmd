@@ -1,0 +1,124 @@
+---
+title: "CourseProject_PracticalMachineLearning_Coursera"
+author: "Adarsh Janakiraman"
+date: "Sunday, March 22, 2015"
+output: html_document
+---
+
+# Coursera - Practical Machine Learning
+### March 2015
+
+This document describes the complete analysis done for the Course Project which is a part of the Coursera course - Practical Machine Leanring. In this project, our aim was to analyse the data from various wearable devices which are used to measure exercise effectiveness, and come up with a prediction algorithm which can be used to predict exercise behavior in the future and give users of these wearables immediate feedback regarding how effective their exercise routine is.
+
+The data available for this exercise involved a training set of the usage of 6 individuals wearing 5 different wearables, while performing 5 exercises of differing effectiveness.
+
+Our aim was to predict the effective grade for future exercises using the same wearables. Thus, this can be described as a *classification problem*.
+
+## Exploratory Analysis
+My first goal was to explore the data in general to find out the structure and anomolies in the underlying data which stick out. 
+First we load the training data set.
+
+```{r}
+setwd("c:/Work/Coursera/Practical Machine Learning/")
+library(caret) # we will use caret package as suggested in this course
+pml_training_data  <- read.table('pml-training.csv', header=T, sep=',')
+pml_training_data$X <- NULL # remove the first column which is just a row number
+#summary(training) # Summary not printed for mkd as it is too long
+```
+On the exploratory analysis, which included viewing the partial data set, I realized that there are two distinct data sets within this single data set. These are split by the variable - **new_window=="yes" or "no"**. Where new_window="yes", this is a summarry row which contains values for the summary columns such as min, max, stddev and amplitude (among others). Where new window is not "yes", these columns are not populated at all. 
+
+## Data cleaning
+
+Since the data in these rows is a *summary* explained by the previous data rows, their presence is unneccessary and likely to introduce bias into the results. So it is best to remove them from the analysis going forward.
+```{r}
+# exclude the rows with new_window==yes -> these are summary data, not required for the data set
+newWindowInd <- which(pml_training_data$new_window=="yes", arr.ind=TRUE)
+pml_training_data_excNewWindow <- pml_training_data[-newWindowInd,] 
+```
+We can then further sanitize the data, by removing the unneccesary aggregate columns which provide no useful data. This step **increased the compuation speed** of the overall model later on.
+
+```{r}
+#further sanitize the data --> remove all the calc data columns as they are useless anyways
+pml_training_data_excNewWindow_removeCols <- pml_training_data_excNewWindow
+colNamesToBeRemoved  <-  list('kurtosis_', 'min_','max_','stddev_','amplitude_','skewness_','var_','avg_')
+for (i in 1:length(colNamesToBeRemoved)){pml_training_data_excNewWindow_removeCols  <- pml_training_data_excNewWindow_removeCols[,-grep(colNamesToBeRemoved[i],names(pml_training_data_excNewWindow_removeCols))]}
+```
+
+## Training Set & Cross validation
+For this analysis, we will treat our 20 case testing set provided as the final validation set. Within the provided training, we will divide it into a sub category of training and testing set. Since the *data set is relatively small*, I chose **70:30 split** for the training and test set.
+
+The outcome variable here is **$classe**, so our split will be based on that variable.
+
+Since the test set is relatively small, cross validation is vital to improve overall perforamnce of the model. For this, I chose to use a **3-fold cross validation** (set ont he trainControl func). The performance impact of increasing the number of folds was significant. As you will see later, the OOB error for the 3 fold cv was already very high, not requiring us to increase it any further.
+```{r}
+#create a training and test set within the training set. so we can validate our model a single time against the validation cases
+inTrain <- createDataPartition(pml_training_data_excNewWindow_removeCols$classe, p=0.7, list=FALSE)
+training <- pml_training_data_excNewWindow_removeCols[inTrain,]
+testing <- pml_training_data_excNewWindow_removeCols[-inTrain,]
+trainControl(method="cv",number=3)
+```
+
+##Feature analysis/ selection
+Now that we have cleaned the data somewhat, we have reduced the number of possible features from 159 to 59, which is a leap forward in terms of improving computation time. Now before deciding on the feature, I tried to plot some of the features against the outcome variable *$classe* as well as the user involved *$user_name*.
+
+###Some of the plots I tried
+```{r, echo=FALSE}
+plot(training$user_name, training$classe)
+```
+All the users and all the classes are represented almost equally. 
+
+```{r, echo=FALSE}
+qplot(training$user_name, training$roll_belt , colour=training$classe, geom=c('jitter'))
+```
+Two distinct user groups appearing. These measure distinct values for roll_belt. For every classe, the higher the variation, the worse the classe (D, E) 
+
+```{r, echo=FALSE}
+qplot(training$classe, training$roll_forearm , colour=training$user_name, geom=c('jitter'))
+```
+User Adelmo showed no activity on the forearm device, which likely indicates a malfunction in the device. What shall we do with this case? If we discount all of Adelmo's results because one of his devices is not working, that removes the impact of the 4 other devices which did work. And since our data set only includes 6 users, removal of even one user from the study reduces the data set by 16%.
+```{r, echo=FALSE}
+featurePlot(training [,c('roll_belt','roll_arm','roll_dumbbell','roll_forearm')], training$classe, plot="pairs")
+```
+The feature plot above shows that **roll_belt** (and other belt based features) is the strongest differentiator among the different classes. This will be proved later on in the model built.
+
+After analysing the various plots, I couldnt come up with any single variable which was overwhelmingly supporting the data, so based on my prior understanding of the data  set and what it is used for, I used my judgement call to select the features which were data collected from the devices. This excludes the timeseries information present in the data set.
+```{r}
+fmla1 <- as.formula(paste("classe ~ ", paste(colnames(training[,7:58]), collapse= "+")))
+```
+
+## Model building
+### Classification Tree
+Since this is a classification problem, my first idea was to try fit a classification tree to this problem. It is a simple model that is computationally efficient. If the output at the end of model is accurate enough, we dont have to use more complicated analysis.
+```{r}
+modelFit <- train(fmla1, method="rpart", data=training)
+modelFit
+```
+But as  seen from the results of this model, the accuracy is quite low, even in the training set, let alone the test set.
+
+### Random forest
+Fit the random forest model to the model. I have put in a tree limit of 100 (based on recommendations from the course forums). Without this limit, the model was taking very long to run. I found that with a 100 tree limit, my accuracy was already very high.
+```{r}
+modelFitRF <- train(fmla1, method="rf", data=training, ntree=100)
+modelFitRF
+```
+Since the accuracy was much higher this time. I decided to validate this against the test set.
+```{r}
+preds <- predict(modelFitRF, newdata=testing)
+confusionMatrix(preds, testing$classe)
+```
+The confusion matrix showed an accuracy of close to 99% which was sufficient to prove that this model was working and could be applied to the validation set.
+
+## Model Validation
+From here on, the process is simple. I loaded the validation set of 20 test cases provided, and performed the same cleaning operations on that set before fitting the model to it.
+```{r}
+pml_validation_data  <- read.table('pml-testing.csv', header=T, sep=',')
+pml_validation_data$X <- NULL # remove the first column which is just a row number
+pml_validation_data_excNewWindow_removeCols <- pml_validation_data
+colNamesToBeRemoved  <-  list('kurtosis_', 'min_','max_','stddev_','amplitude_','skewness_','var_','avg_')
+for (i in 1:length(colNamesToBeRemoved)){pml_validation_data_excNewWindow_removeCols  <- pml_validation_data_excNewWindow_removeCols[,-grep(colNamesToBeRemoved[i],names(pml_validation_data_excNewWindow_removeCols))]}
+validationPreds <- predict(modelFitRF, newdata=pml_validation_data_excNewWindow_removeCols)
+validationPreds
+```
+
+This result was then uploaded to the Course website submission page. Happy to say that I got all 20/20 predictions correct using the model above :)
+
